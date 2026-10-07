@@ -122,3 +122,37 @@ cargo test --locked
 Tests use ephemeral loopback HTTP fixtures with a test-only injected client;
 none contact the public internet. Production target validation has no bypass.
 The committed lockfile makes application dependency resolution reproducible.
+
+## Manual GitHub-hosted Frostal check
+
+The **Frostal public check (manual)** Actions workflow runs only when explicitly
+started with **Run workflow**. It has no schedule and does not crawl on pushes or
+pull requests. Its fixed target is `https://frostal.us/`; there are no custom URL
+inputs, secrets, or credentials required.
+
+It uses a GitHub-hosted Ubuntu 24.04 runner, a locked Cargo build, at most five
+scheduled pages, depth two, three redirects per chain, one-second minimum pacing,
+ten-second request timeouts, and a 2 MB body cap. Existing origin, public-IP,
+robots, and HTTP 403/429 protections stay enabled. The crawl has a five-minute
+wall-clock cap (plus ten seconds for termination); the whole job is capped at
+15 minutes, including an eight-minute build limit. Concurrency is limited to
+one Frostal workflow run at a time.
+
+Open the run's summary or download its **frostal-public-check** artifact for
+`report.txt` and `report.json`, the underlying CLI JSON, stderr, and CLI exit
+status. The human report is rendered from that single JSON crawl: it does not
+run a second crawl. Metadata records UTC timestamps, commit, run URL, and the
+GitHub-hosted vantage. Artifacts expire after 14 days.
+
+Reports are attempted even if build or crawl fails. A setup/build/DNS failure or
+hard timeout is an unavailable/incomplete assessment, not evidence that the site
+is broken. Access or robots stops remain incomplete; ordinary findings can be
+HTTP failures or fetch errors. The workflow preserves a nonzero CLI exit status
+after uploading evidence. A runner outage or forced cancellation may prevent
+report creation or artifact upload; use the Actions logs in that case.
+
+GitHub may make logs and artifacts accessible to people with repository/run
+access. Only public-site observations are recorded. The official checkout and
+artifact actions are pinned to verified v7.0.1 commit SHAs using the Node 24
+runtime; repository token permissions are read-only and checkout does not retain
+credentials. Running this workflow does not change the website or its hosting.
