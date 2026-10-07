@@ -1,0 +1,134 @@
+name: Frostal public check (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frostal-public-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build locked CLI
+        id: build
+        timeout-minutes: 8
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          cargo build --locked
+      - name: Check Frostal once
+        id: crawl
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          mkdir -p reports
+          date -u +%Y-%m-%dT%H:%M:%SZ > reports/check-started.txt
+          set +e
+          timeout --signal=TERM --kill-after=10s 300s ./target/debug/pagewatch \
+            https://frostal.us/ --max-pages 5 --max-depth 2 \
+            --max-redirects 3 --delay-ms 1000 --timeout-secs 10 \
+            --max-body-bytes 2000000 \
+            --vantage 'GitHub-hosted ubuntu-24.04 runner; direct HTTP client' \
+            --json > reports/pagewatch.json 2> reports/stderr.txt
+          code=$?
+          set -e
+          printf '%s\n' "$code" > reports/exit-code.txt
+          printf 'exit_code=%s\n' "$code" >> "$GITHUB_OUTPUT"
+      - name: Create human and JSON reports even after failure
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          CRAWL_OUTCOME: ${{ steps.crawl.outcome }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib
+          root = pathlib.Path("reports")
+          root.mkdir(exist_ok=True)
+          def read(name):
+              path = root / name
+              return path.read_text(errors="replace").strip() if path.exists() else ""
+          raw, code_text = read("pagewatch.json"), read("exit-code.txt")
+          code = int(code_text) if code_text.isdigit() else None
+          try:
+              report = json.loads(raw) if raw else None
+          except json.JSONDecodeError:
+              report = None
+          if code is None:
+              outcome = "Runner/build failure or interruption; crawl result unavailable"
+          elif code == 124 or code == 137:
+              outcome = "Run time limit reached; incomplete, no site-health conclusion"
+          elif report is None:
+              outcome = "CLI setup/network failure; no site-health conclusion"
+          elif code == 2:
+              outcome = "Crawl stopped by access, robots, or network condition; incomplete"
+          elif code == 1:
+              outcome = "Observed HTTP findings or fetch errors; inspect individual results"
+          elif not report.get("pages"):
+              outcome = "No pages checked; no site-health conclusion"
+          else:
+              outcome = "No observed page errors in checked subset only"
+          metadata = {
+              "target": "https://frostal.us/",
+              "vantage": "GitHub-hosted ubuntu-24.04 runner; direct HTTP client",
+              "check_started_utc": read("check-started.txt") or None,
+              "report_created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "run_url": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+              "commit": os.environ["GITHUB_SHA"],
+              "build_outcome": os.environ["BUILD_OUTCOME"],
+              "crawl_step_outcome": os.environ["CRAWL_OUTCOME"],
+              "cli_exit_code": code,
+              "interpretation": outcome,
+          }
+          (root / "report.json").write_text(json.dumps({"run": metadata, "pagewatch": report, "stderr": read("stderr.txt")}, indent=2) + "\n")
+          lines = ["Frostal public check", outcome] + [f"{key}: {value}" for key, value in metadata.items()]
+          if report:
+              lines.append(report["timing_note"])
+              for page in report["pages"]:
+                  lines.append(f"{page['status']} {page['url']} | {page['fetch_ms']} ms | {page['bytes']} bytes | error: {page['error']}")
+                  for hop in page["hops"]:
+                      lines.append(f"  {hop['status']} {hop['url']} | headers {hop['headers_ms']} ms")
+                  if page.get("reused_url"):
+                      lines.append(f"  Reused terminal result from {page['reused_url']}")
+              lines.append(f"Limits reached: {report['truncated']}; out-of-origin links: {report['skipped_out_of_scope']}")
+              lines.append(f"Robots exclusions: {report['skipped_robots']}")
+              lines.append(f"Stopped: {report['stopped']}")
+          if read("stderr.txt"):
+              lines.append("CLI stderr: " + read("stderr.txt"))
+          lines.append("Coverage: server HTML links only; no JavaScript, login, or guessed routes. HTTP timings are not Core Web Vitals.")
+          text = "\n".join(lines) + "\n"
+          (root / "report.txt").write_text(text)
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n".join("    " + line for line in lines) + "\n")
+          PY
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frostal-public-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve non-success exit status
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -s reports/exit-code.txt ]; then
+            echo 'No completed CLI invocation; inspect setup/build logs.'
+            exit 2
+          fi
+          code=$(cat reports/exit-code.txt)
+          case "$code" in
+            0|1|2|124|137) exit "$code" ;;
+            *) echo 'Unexpected CLI exit status; inspect report.'; exit 2 ;;
+          esac
