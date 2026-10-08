@@ -44,11 +44,31 @@ in place of `pagewatch`. Run either command with `--help` for every option.
   different origins. Start with the canonical HTTPS URL
 - Fragment deduplication, redirect reuse, and loop/chain limits
 - HTTP status, response size, header timing for each hop, and total fetch time
+- Optional case-sensitive literal check in the starting URL’s final HTML source
 - Human-readable output or versioned JSON (`schema_version: 1`)
 
 Queries are preserved because different queries can be different pages. It does
 not sort queries, guess routes, or equate trailing-slash URLs. Non-HTTP links are
 ignored. Only `text/html` responses are parsed for links.
+
+## Expected HTML text
+
+```sh
+pagewatch https://your-site.example --expect-text 'Welcome' --max-pages 5
+```
+
+`--expect-text` requires a nonempty, case-sensitive literal substring in the
+starting URL's final `text/html` response after permitted redirects. It checks
+UTF-8-decoded HTML source (with replacement for invalid bytes), not visible or
+JavaScript-rendered text; markup and entities are not normalized. Choose a
+stable public marker. Descendant pages are not required to contain it.
+
+Missing text, an empty body, a non-HTML response, or an uncheckable starting page
+cannot pass. HTTP errors still fail even when the marker exists. A mismatch does
+not stop ordinary link discovery. JSON adds `expected_text` only when requested,
+with `text`, `matched`, and `error`; text output prints the same result.
+The supplied marker appears in reports, so do not use secrets. Without this
+option, crawl behavior and JSON fields are unchanged.
 
 ## Politeness and safety
 
@@ -100,13 +120,14 @@ Exit codes:
 
 - **0:** No observed page errors in the checked subset
 - **1:** At least one page had HTTP 4xx/5xx, a network/body error, or an unsafe,
-  blocked, looping, or excessive redirect
+  blocked, looping, or excessive redirect; also a missing/uncheckable expected text
 - **2:** Invalid invocation/target, DNS failure, or an interrupted crawl (including
   inaccessible robots or HTTP 403/429)
 
 `truncated: true` means a page/depth/discovery limit omitted potential coverage.
 Robots exclusions are listed separately. Neither condition alone changes an
-otherwise successful exit code. A success is not a claim that the whole site is
+otherwise successful exit code, except that an expected-text check fails if
+robots rules prevent checking the starting URL. A success is not a claim that the whole site is
 healthy. Fatal setup failures go to stderr even with `--json`; interrupted crawls
 produce a report. Report timestamps are Unix seconds in UTC. `--vantage` is a
 user-supplied label, not verified geolocation.
@@ -120,7 +141,8 @@ fetched again.
 **SPA limitation:** a JavaScript-only application may expose few or no links in
 its HTML shell. Pagewatch does not discover client-side routes, inspect rendered
 UI, measure browser performance, or test authenticated areas. A 200 status can
-also be a soft 404; content correctness is not assessed. Robots rules are not a
+also be a soft 404; the optional expected-text check can catch a missing marker,
+but does not prove content correctness. Robots rules are not a
 substitute for permission to assess a site. Use only sites you are authorized to
 check. URLs and query strings appear in reports; review before sharing reports.
 
@@ -198,7 +220,9 @@ inputs, secrets, or credentials required.
 
 It uses a GitHub-hosted Ubuntu 24.04 runner, a locked Cargo build, at most five
 scheduled pages, depth two, three redirects per chain, one-second minimum pacing,
-ten-second request timeouts, and a 2 MB body cap. Existing origin, public-IP,
+ten-second request timeouts, and a 2 MB body cap. It requires the literal
+`Frostal.us` in the starting page’s final HTML source. This is an HTML marker
+check, not a rendered-browser test. Existing origin, public-IP,
 robots, and HTTP 403/429 protections stay enabled. The crawl has a five-minute
 wall-clock cap (plus ten seconds for termination); the whole job is capped at
 15 minutes, including an eight-minute build limit. Concurrency is limited to

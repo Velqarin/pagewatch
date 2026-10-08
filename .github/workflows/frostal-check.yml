@@ -36,7 +36,7 @@ jobs:
           timeout --signal=TERM --kill-after=10s 300s ./target/debug/pagewatch \
             https://frostal.us/ --max-pages 5 --max-depth 2 \
             --max-redirects 3 --delay-ms 1000 --timeout-secs 10 \
-            --max-body-bytes 2000000 \
+            --max-body-bytes 2000000 --expect-text 'Frostal.us' \
             --vantage 'GitHub-hosted ubuntu-24.04 runner; direct HTTP client' \
             --json > reports/pagewatch.json 2> reports/stderr.txt
           code=$?
@@ -72,11 +72,13 @@ jobs:
           elif code == 2:
               outcome = "Crawl stopped by access, robots, or network condition; incomplete"
           elif code == 1:
-              outcome = "Observed HTTP findings or fetch errors; inspect individual results"
+              outcome = "Observed HTTP, fetch, or expected-text findings; inspect individual results"
           elif not report.get("pages"):
               outcome = "No pages checked; no site-health conclusion"
+          elif code == 0 and report.get("expected_text", {}).get("matched") is True:
+              outcome = "No observed page errors; expected HTML text matched in starting page only"
           else:
-              outcome = "No observed page errors in checked subset only"
+              outcome = "Unexpected exit status or missing expected-text confirmation; incomplete"
           metadata = {
               "target": "https://frostal.us/",
               "vantage": "GitHub-hosted ubuntu-24.04 runner; direct HTTP client",
@@ -93,6 +95,9 @@ jobs:
           lines = ["Frostal public check", outcome] + [f"{key}: {value}" for key, value in metadata.items()]
           if report:
               lines.append(report["timing_note"])
+              expected = report.get("expected_text")
+              if expected:
+                  lines.append(f"Expected HTML text {expected['text']!r}: matched={expected['matched']}; error={expected['error']}")
               for page in report["pages"]:
                   lines.append(f"{page['status']} {page['url']} | {page['fetch_ms']} ms | {page['bytes']} bytes | error: {page['error']}")
                   for hop in page["hops"]:

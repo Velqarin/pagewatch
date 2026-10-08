@@ -33,6 +33,9 @@ struct Args {
     /// Label for the machine/network running this check (not geolocation).
     #[arg(long, default_value = "local execution environment")]
     vantage: String,
+    /// Require this case-sensitive literal in the starting URL's final HTML source.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expect_text: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -55,6 +58,28 @@ struct Page {
     error: Option<String>,
 }
 #[derive(Serialize)]
+struct ExpectedText {
+    text: String,
+    matched: bool,
+    error: Option<String>,
+}
+impl ExpectedText {
+    fn check(&mut self, page: &Page, body: &str, html: bool) {
+        self.error = if let Some(error) = &page.error {
+            Some(format!("expected text could not be checked: {error}"))
+        } else if !html {
+            Some("expected text could not be checked: final response is not text/html".into())
+        } else if body.is_empty() {
+            Some("expected text missing: final HTML response has an empty body".into())
+        } else if !body.contains(&self.text) {
+            Some("expected text missing from starting URL's final HTML response".into())
+        } else {
+            None
+        };
+        self.matched = self.error.is_none();
+    }
+}
+#[derive(Serialize)]
 struct Report {
     schema_version: u8,
     started_unix_seconds: u64,
@@ -67,15 +92,18 @@ struct Report {
     skipped_out_of_scope: usize,
     truncated: bool,
     stopped: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_text: Option<ExpectedText>,
 }
 impl Report {
     fn exit_code(&self) -> i32 {
         if self.stopped.is_some() {
             2
-        } else if self
-            .pages
-            .iter()
-            .any(|p| p.error.is_some() || p.status.is_some_and(|s| s >= 400))
+        } else if self.expected_text.as_ref().is_some_and(|e| !e.matched)
+            || self
+                .pages
+                .iter()
+                .any(|p| p.error.is_some() || p.status.is_some_and(|s| s >= 400))
         {
             1
         } else {
@@ -297,6 +325,13 @@ impl Crawler<'_> {
             skipped_out_of_scope: 0,
             truncated: false,
             stopped: None,
+            expected_text: self.args.expect_text.as_ref().map(|text| ExpectedText {
+                text: text.clone(),
+                matched: false,
+                error: Some(
+                    "expected text could not be checked: starting URL was not fetched".into(),
+                ),
+            }),
         };
         let mut robots_url = self.target.clone();
         robots_url.set_path("/robots.txt");
@@ -363,6 +398,11 @@ impl Crawler<'_> {
                 continue;
             }
             let (page, body, html) = self.fetch(url.clone(), depth, true);
+            if url == self.target
+                && let Some(expected) = &mut report.expected_text
+            {
+                expected.check(&page, &body, html);
+            }
             for hop in &page.hops {
                 seen.insert(hop.url.clone());
             }
@@ -479,6 +519,16 @@ fn main() {
                 if let Some(reason) = &report.stopped {
                     println!("STOPPED: {reason}");
                 }
+                if let Some(expected) = &report.expected_text {
+                    println!(
+                        "Expected text {:?}: {}",
+                        expected.text,
+                        expected
+                            .error
+                            .as_deref()
+                            .unwrap_or("matched in starting URL's final HTML response")
+                    );
+                }
                 println!(
                     "Coverage: server HTML links only; no JavaScript, login, forms, subdomains, or guessed routes."
                 );
@@ -542,9 +592,14 @@ mod tests {
                         .find(|r| r.0 == path)
                         .copied()
                         .unwrap_or(("", 404, "", "missing"));
+                    let content_type = if headers.to_ascii_lowercase().contains("content-type:") {
+                        ""
+                    } else {
+                        "Content-Type: text/html\r\n"
+                    };
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 {status} Fixture\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+                        "HTTP/1.1 {status} Fixture\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
                         body.len()
                     );
                 }
@@ -839,5 +894,115 @@ mod tests {
         assert!(alias.error.as_ref().unwrap().contains("outside origin"));
         assert!(alias.reused_url.is_some());
         assert_eq!(f.hits().iter().filter(|p| *p == "/a").count(), 1);
+    }
+    #[test]
+    fn expected_text_matches_literal_case_and_only_starting_page() {
+        let f = Fixture::new(vec![
+            (
+                "/",
+                200,
+                "",
+                "<h1>Ready [.*]</h1><a href='/child'>child</a>",
+            ),
+            ("/child", 200, "", "other content"),
+        ]);
+        let r = f.run(&["--expect-text", "Ready [.*]"]);
+        assert_eq!(r.exit_code(), 0);
+        assert_eq!(r.pages.len(), 2);
+        assert!(r.expected_text.unwrap().matched);
+        for marker in ["ready [.*]", "Ready.*", "missing"] {
+            let r = f.run(&["--expect-text", marker]);
+            assert_eq!(r.exit_code(), 1);
+            assert_eq!(r.pages.len(), 2); // Mismatch does not suppress discovery.
+            assert_eq!(r.pages[0].status, Some(200));
+            let json = serde_json::to_value(&r).unwrap();
+            assert_eq!(json["expected_text"]["matched"], false);
+            assert!(
+                json["expected_text"]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("missing")
+            );
+        }
+    }
+    #[test]
+    fn expected_text_uses_final_redirect_body() {
+        let f = Fixture::new(vec![
+            ("/", 302, "Location: /final\r\n", "redirect-only"),
+            ("/final", 200, "", "final-only"),
+        ]);
+        let r = f.run(&["--expect-text", "final-only"]);
+        assert_eq!(r.exit_code(), 0);
+        assert_eq!(r.pages[0].hops.len(), 2);
+        assert_eq!(f.run(&["--expect-text", "redirect-only"]).exit_code(), 1);
+    }
+    #[test]
+    fn expected_text_rejects_empty_argument_and_unusable_responses() {
+        assert!(
+            Args::try_parse_from(["pagewatch", "https://example.com", "--expect-text", ""])
+                .is_err()
+        );
+        for (headers, body, reason) in [
+            ("Content-Type: text/plain\r\n", "marker", "not text/html"),
+            (
+                "Content-Type: application/json\r\n",
+                "marker",
+                "not text/html",
+            ),
+            ("Content-Type: \r\n", "marker", "not text/html"),
+            ("", "", "empty body"),
+        ] {
+            let f = Fixture::new(vec![("/", 200, headers, body)]);
+            let r = f.run(&["--expect-text", "marker"]);
+            assert_eq!(r.exit_code(), 1);
+            assert!(r.expected_text.unwrap().error.unwrap().contains(reason));
+            let default = f.run(&[]);
+            assert_eq!(default.exit_code(), 0);
+            assert!(
+                serde_json::to_value(default)
+                    .unwrap()
+                    .get("expected_text")
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn expected_text_never_passes_when_skipped_or_fetch_fails() {
+        let f = Fixture::new(vec![(
+            "/robots.txt",
+            200,
+            "",
+            "User-agent: *\nDisallow: /\n",
+        )]);
+        let r = f.run(&["--expect-text", "marker"]);
+        assert_eq!(r.exit_code(), 1);
+        assert!(r.pages.is_empty());
+        assert!(!r.expected_text.unwrap().matched);
+        for (status, headers, body, options, code) in [
+            (200, "", "marker-too-big", vec!["--max-body-bytes", "10"], 1),
+            (
+                302,
+                "Location: https://example.com/\r\n",
+                "marker",
+                vec![],
+                1,
+            ),
+            (403, "", "marker", vec![], 2),
+            (429, "", "marker", vec![], 2),
+        ] {
+            let f = Fixture::new(vec![("/", status, headers, body)]);
+            let mut args = vec!["--expect-text", "marker"];
+            args.extend(options);
+            let r = f.run(&args);
+            assert_eq!(r.exit_code(), code);
+            assert!(!r.expected_text.unwrap().matched);
+        }
+    }
+    #[test]
+    fn expected_text_does_not_mask_http_failure() {
+        let f = Fixture::new(vec![("/", 500, "", "marker")]);
+        let r = f.run(&["--expect-text", "marker"]);
+        assert!(r.expected_text.as_ref().unwrap().matched);
+        assert_eq!(r.exit_code(), 1);
     }
 }
