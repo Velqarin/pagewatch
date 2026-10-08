@@ -124,6 +124,59 @@ also be a soft 404; content correctness is not assessed. Robots rules are not a
 substitute for permission to assess a site. Use only sites you are authorized to
 check. URLs and query strings appear in reports; review before sharing reports.
 
+## Troubleshooting
+
+### `pagewatch: command not found`
+
+A successful build does not install the command. From the repository root, try
+`./target/release/pagewatch --help` after `cargo build --release --locked`.
+For use from other directories, run `cargo install --path . --locked` and add the
+installation's `bin` directory to your shell's `PATH` (normally `~/.cargo/bin`;
+Cargo prints the destination during installation). If `cargo` itself is missing,
+finish the Rust toolchain setup and reopen your shell before retrying.
+
+### DNS or connection failures, including proxy-only networks
+
+Check the hostname and read stderr first. Setup errors such as
+`DNS resolution failed` or `DNS resolution timed out` exit with code 2 before a
+JSON report is produced, so redirecting `--json` output can leave an empty file.
+Do not interpret that file as a successful check.
+
+Pagewatch deliberately ignores environment proxy variables and validates every
+resolved address. A website working in a browser does not prove this direct
+HTTP client can reach it. Use a network where direct public access is permitted;
+do not disable target validation, TLS checks, or network restrictions. A
+private/special-use address rejection is intentional, including when any DNS
+answer is non-public. Connection failures after setup appear in page errors or
+the report's `stopped` reason; inspect those before drawing a site-health conclusion.
+
+### A JavaScript application returns 200 but few pages are checked
+
+Inspect the server-delivered HTML and its Content-Type. Discovery uses
+`a[href]` and `area[href]` in successful `text/html` responses, not links added
+by JavaScript. Increasing crawl limits will not expose client-side routes.
+Use a separate browser-based test for rendered UI and client-side navigation.
+A successful HTTP response alone does not verify the page's content.
+
+### The crawl is incomplete
+
+Check `truncated`, `stopped`, `skipped_robots`, `skipped_out_of_scope`, and
+individual page errors in the JSON report:
+
+- `truncated: true`: a page/discovery or depth limit omitted links. For a site
+  you are authorized to check, increase `--max-pages` or `--max-depth` gradually
+  within the [documented bounds](#bounds), keeping polite pacing.
+- A non-null `stopped`: the crawl ended early. Respect robots failures and HTTP
+  403/429; increasing limits does not override these stops.
+- Robots exclusions and out-of-origin links are intentionally skipped. Start
+  with the canonical scheme, host, and port; subdomains are separate origins.
+- A body-size error means that page was not parsed for links. Review
+  `--max-body-bytes` and the [bounds](#bounds) before choosing a larger cap.
+
+Exit code 0 means no observed page errors in the checked subset. Even
+`truncated: false` does not prove whole-site coverage: unlinked pages,
+JavaScript-only routes, robots exclusions, and other origins remain outside it.
+
 ## Development
 
 ```sh
