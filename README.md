@@ -7,22 +7,35 @@ No account, service, browser, JavaScript runtime, or background monitor.
 
 ## Quick start
 
-Install a stable Rust toolchain from [rustup.rs](https://rustup.rs), then:
+With Git installed, install a stable Rust toolchain from [rustup.rs](https://rustup.rs),
+then clone the repository and build from its root:
 
 ```sh
+git clone https://github.com/Velqarin/pagewatch.git
+cd pagewatch
 cargo build --release --locked
+./target/release/pagewatch --help
 ./target/release/pagewatch https://example.com --max-pages 10
 ./target/release/pagewatch https://example.com --json > report.json
 ```
 
-For your own site, start small:
+These commands run the built binary directly; installation is optional. To make
+`pagewatch` available from other directories, install it from the repository root
+and ensure Cargo's binary directory (normally `~/.cargo/bin`) is on your `PATH`:
+
+```sh
+cargo install --path . --locked
+pagewatch --help
+```
+
+After installing, start small on your own site:
 
 ```sh
 pagewatch https://your-site.example --max-pages 5 --max-depth 2 --vantage "my laptop / home Wi-Fi"
 ```
 
-Run `cargo install --path . --locked` to put the CLI on your Cargo PATH.
-Run `pagewatch --help` for every option.
+Without installation, use `./target/release/pagewatch` from the repository root
+in place of `pagewatch`. Run either command with `--help` for every option.
 
 ## What it checks
 
